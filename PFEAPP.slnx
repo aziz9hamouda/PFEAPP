@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="pfeapp.client/pfeapp.client.esproj">
+    <Build />
+    <Deploy />
+  </Project>
+  <Project Path="PFEAPP.Server/PFEAPP.Server.csproj" />
+</Solution>

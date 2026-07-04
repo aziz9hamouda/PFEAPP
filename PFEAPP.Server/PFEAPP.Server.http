@@ -1,0 +1,6 @@
+@PFEAPP.Server_HostAddress = http://localhost:5092
+
+GET {{PFEAPP.Server_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
