@@ -242,7 +242,7 @@ export default function App() {
                             <div style={{ width: 32, height: 32, borderRadius: 8, background: COLORS.red, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: "0.9rem" }}>D</div>
                             <span style={{ color: "#fff", fontWeight: 700 }}>Dynamix Services</span>
                             <span style={{ color: "rgba(255,255,255,0.4)" }}>|</span>
-                            <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>ETL Runner</span>
+                            <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>Dashboard Power BI</span>
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                             <span style={{ color: "#fff", fontSize: "0.85rem" }}>{user?.name}</span>
@@ -274,7 +274,7 @@ export default function App() {
                             <div style={{ width: 32, height: 32, borderRadius: 8, background: COLORS.red, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: "0.9rem" }}>D</div>
                             <span style={{ color: "#fff", fontWeight: 700 }}>Dynamix Services</span>
                             <span style={{ color: "rgba(255,255,255,0.4)" }}>|</span>
-                            <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>ETL Runner</span>
+                            <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>Prediction</span>
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                             <span style={{ color: "#fff", fontSize: "0.85rem" }}>{user?.name}</span>
@@ -306,7 +306,7 @@ export default function App() {
                             <div style={{ width: 32, height: 32, borderRadius: 8, background: COLORS.red, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: "0.9rem" }}>D</div>
                             <span style={{ color: "#fff", fontWeight: 700 }}>Dynamix Services</span>
                             <span style={{ color: "rgba(255,255,255,0.4)" }}>|</span>
-                            <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>ETL Runner</span>
+                            <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>Segmentation</span>
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                             <span style={{ color: "#fff", fontSize: "0.85rem" }}>{user?.name}</span>
@@ -338,7 +338,7 @@ export default function App() {
                             <div style={{ width: 32, height: 32, borderRadius: 8, background: COLORS.red, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: "0.9rem" }}>D</div>
                             <span style={{ color: "#fff", fontWeight: 700 }}>Dynamix Services</span>
                             <span style={{ color: "rgba(255,255,255,0.4)" }}>|</span>
-                            <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>ETL Runner</span>
+                            <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>AGENT IA</span>
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                             <span style={{ color: "#fff", fontSize: "0.85rem" }}>{user?.name}</span>

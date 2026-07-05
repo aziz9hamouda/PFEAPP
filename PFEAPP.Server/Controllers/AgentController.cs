@@ -6,6 +6,7 @@ namespace PFEAPP.Server.Controllers
     public class ChatRequest
     {
         public string Message { get; set; } = "";
+        public string ActiveDashboard { get; set; } = "";
         public List<AgentMessage> History { get; set; } = new();
     }
 
@@ -20,7 +21,6 @@ namespace PFEAPP.Server.Controllers
             _agentService = agentService;
         }
 
-        // POST api/agent/chat
         [HttpPost("chat")]
         public async Task<IActionResult> Chat([FromBody] ChatRequest request)
         {
@@ -29,7 +29,11 @@ namespace PFEAPP.Server.Controllers
 
             try
             {
-                var response = await _agentService.ProcessMessageAsync(request.Message, request.History);
+                var response = await _agentService.ProcessMessageAsync(
+                    request.Message,
+                    request.History,
+                    request.ActiveDashboard
+                );
                 return Ok(response);
             }
             catch (Exception ex)
