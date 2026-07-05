@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { apiFetch } from "../lib/api";
 
 const COLORS = {
     violet: "#3B1F8C",
@@ -46,6 +47,48 @@ function ReadOnlyField({ label, value, unit }) {
     );
 }
 
+function SegmentationHistory() {
+    const [history, setHistory] = useState([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        apiFetch("/api/segmentation/predictions/history")
+            .then((r) => r.json())
+            .then((data) => setHistory(Array.isArray(data) ? data : []))
+            .finally(() => setLoading(false));
+    }, []);
+
+    if (loading) return <div style={{ textAlign: "center", color: "#9ca3af", padding: "2rem" }}>Chargement...</div>;
+
+    return (
+        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
+                <thead>
+                    <tr style={{ background: COLORS.violet }}>
+                        {["Date", "Client", "Segment", "Demandé par"].map((h) => (
+                            <th key={h} style={{ padding: "0.75rem 1rem", textAlign: "left", color: "#fff", fontWeight: 700, fontSize: "0.78rem" }}>{h}</th>
+                        ))}
+                    </tr>
+                </thead>
+                <tbody>
+                    {history.map((h) => {
+                        const result = JSON.parse(h.resultJson || "{}");
+                        return (
+                            <tr key={h.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                                <td style={{ padding: "0.625rem 1rem", color: "#6b7280" }}>{new Date(h.predictedAt).toLocaleString("fr-FR")}</td>
+                                <td style={{ padding: "0.625rem 1rem", color: "#374151" }}>{result.clientName || "—"}</td>
+                                <td style={{ padding: "0.625rem 1rem", fontWeight: 700, color: COLORS.violet }}>{result.segment || "—"}</td>
+                                <td style={{ padding: "0.625rem 1rem", color: "#9ca3af" }}>{h.predictedByEmail || "—"}</td>
+                            </tr>
+                        );
+                    })}
+                </tbody>
+            </table>
+            {history.length === 0 && <div style={{ textAlign: "center", color: "#9ca3af", padding: "2rem" }}>Aucune segmentation enregistrée.</div>}
+        </div>
+    );
+}
+
 export default function SegmentationPredictor() {
     const [clients, setClients] = useState([]);
     const [selectedClient, setSelectedClient] = useState("");
@@ -53,14 +96,11 @@ export default function SegmentationPredictor() {
     const [loadingRfm, setLoadingRfm] = useState(false);
     const [isNewClient, setIsNewClient] = useState(false);
 
-    // Champs manuels pour nouveau client
-    const [manualRfm, setManualRfm] = useState({
-        recence: "", frequence: "", ca_total: "", marge_moyenne: ""
-    });
-
     const [result, setResult] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
+    const [fieldErrors, setFieldErrors] = useState({});
+    const [tab, setTab] = useState("predict"); // "predict" | "history"
 
     // Charger la liste des clients
     useEffect(() => {
@@ -70,17 +110,21 @@ export default function SegmentationPredictor() {
             .catch(() => { });
     }, []);
 
-    // Quand un client est sélectionné → charger ses données RFM
+    // Quand un client est sélectionné (ou tapé) → charger ses données RFM, ou proposer une saisie
+    // manuelle si le nom tapé ne correspond à aucun client connu.
     const handleClientChange = async (clientName) => {
         setSelectedClient(clientName);
         setResult(null);
         setError(null);
+        setFieldErrors({});
         setRfmData(null);
 
-        if (!clientName) return;
+        if (!clientName.trim()) { setIsNewClient(false); return; }
 
-        if (clientName === "__nouveau__") {
+        const known = clients.find((c) => c.clientName === clientName);
+        if (!known) {
             setIsNewClient(true);
+            setRfmData({ isExisting: false, recence: 0, frequence: 0, ca_Total: 0, marge_Moyenne: 0 });
             return;
         }
 
@@ -98,9 +142,22 @@ export default function SegmentationPredictor() {
         }
     };
 
+    const validate = () => {
+        const errs = {};
+        if (!selectedClient.trim()) errs.client = "Le client est obligatoire.";
+        if (rfmData) {
+            if (rfmData.recence < 0) errs.recence = "Ne peut pas être négatif.";
+            if (rfmData.frequence < 0) errs.frequence = "Ne peut pas être négatif.";
+            if (rfmData.ca_Total < 0) errs.ca_Total = "Ne peut pas être négatif.";
+        }
+        return errs;
+    };
+
     const handlePredict = async () => {
-        if (!selectedClient || selectedClient === "__nouveau__" && !manualRfm.recence) {
-            setError("Veuillez sélectionner un client et remplir les données.");
+        const errs = validate();
+        setFieldErrors(errs);
+        if (Object.keys(errs).length > 0) {
+            setError("Veuillez corriger les champs en erreur.");
             return;
         }
 
@@ -108,25 +165,16 @@ export default function SegmentationPredictor() {
         setError(null);
         setResult(null);
 
-        const rfm = isNewClient ? {
-            recence: parseFloat(manualRfm.recence) || 0,
-            frequence: parseFloat(manualRfm.frequence) || 0,
-            ca_Total: parseFloat(manualRfm.ca_total) || 0,
-            marge_Moyenne: parseFloat(manualRfm.marge_moyenne) || 0,
-        } : {
-            recence: rfmData?.recence || 0,
-            frequence: rfmData?.frequence || 0,
-            ca_Total: rfmData?.ca_Total || 0,
-            marge_Moyenne: rfmData?.marge_Moyenne || 0,
-        };
-
         try {
-            const res = await fetch("/api/segmentation/predict", {
+            const res = await apiFetch("/api/segmentation/predict", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    clientName: selectedClient === "__nouveau__" ? "Nouveau client" : selectedClient,
-                    ...rfm
+                    clientName: selectedClient,
+                    recence: rfmData?.recence || 0,
+                    frequence: rfmData?.frequence || 0,
+                    ca_Total: rfmData?.ca_Total || 0,
+                    marge_Moyenne: rfmData?.marge_Moyenne || 0,
                 }),
             });
             const text = await res.text();
@@ -145,9 +193,9 @@ export default function SegmentationPredictor() {
         setSelectedClient("");
         setRfmData(null);
         setIsNewClient(false);
-        setManualRfm({ recence: "", frequence: "", ca_total: "", marge_moyenne: "" });
         setResult(null);
         setError(null);
+        setFieldErrors({});
     };
 
     const segConf = result ? (SEGMENT_CONFIG[result.segment] ?? SEGMENT_CONFIG["Faible valeur"]) : null;
@@ -157,18 +205,31 @@ export default function SegmentationPredictor() {
         <div style={{ fontFamily: "'Segoe UI', sans-serif", padding: "2rem", maxWidth: 1000, margin: "0 auto" }}>
 
             {/* Header */}
-            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", borderBottom: `3px solid ${COLORS.violet}`, paddingBottom: "1rem", marginBottom: "2rem" }}>
-                <div style={{ width: 6, height: 44, background: COLORS.red, borderRadius: 3 }} />
-                <div>
-                    <h1 style={{ margin: 0, fontSize: "1.5rem", fontWeight: 800, color: COLORS.violet }}>
-                        Segmentation Client — Modèle RFM K-Means
-                    </h1>
-                    <p style={{ margin: 0, color: "#6b7280", fontSize: "0.85rem" }}>
-                        Tandem Logistics · Dynamix Services · 4 segments : VIP, Fidèle, À risque, Faible valeur
-                    </p>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", borderBottom: `3px solid ${COLORS.violet}`, paddingBottom: "1rem", marginBottom: "1.5rem" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                    <div style={{ width: 6, height: 44, background: COLORS.red, borderRadius: 3 }} />
+                    <div>
+                        <h1 style={{ margin: 0, fontSize: "1.5rem", fontWeight: 800, color: COLORS.violet }}>
+                            Segmentation Client — Modèle RFM K-Means
+                        </h1>
+                        <p style={{ margin: 0, color: "#6b7280", fontSize: "0.85rem" }}>
+                            Tandem Logistics · Dynamix Services · 4 segments : VIP, Fidèle, À risque, Faible valeur
+                        </p>
+                    </div>
+                </div>
+                <div style={{ display: "flex", gap: "0.5rem" }}>
+                    {[["predict", "🎯 Segmenter"], ["history", "📜 Historique"]].map(([id, label]) => (
+                        <button key={id} onClick={() => setTab(id)}
+                            style={{ padding: "0.5rem 1rem", borderRadius: 8, border: "none", cursor: "pointer", fontWeight: 700, fontSize: "0.85rem", background: tab === id ? COLORS.violet : "#f3f4f6", color: tab === id ? "#fff" : "#374151" }}>
+                            {label}
+                        </button>
+                    ))}
                 </div>
             </div>
 
+            {tab === "history" && <SegmentationHistory />}
+
+            {tab === "predict" && (
             <div style={{ display: "grid", gridTemplateColumns: "1fr 380px", gap: "1.5rem" }}>
 
                 {/* Formulaire */}
@@ -182,17 +243,22 @@ export default function SegmentationPredictor() {
                         <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 600, color: "#374151", marginBottom: "0.3rem" }}>
                             Client <span style={{ color: COLORS.red }}>*</span>
                         </label>
-                        <select
+                        <input
+                            list="segmentation-clients"
                             value={selectedClient}
                             onChange={(e) => handleClientChange(e.target.value)}
-                            style={{ width: "100%", padding: "0.5rem 0.75rem", border: "1.5px solid #d1d5db", borderRadius: 8, fontSize: "0.875rem", background: "#fff", cursor: "pointer", outline: "none", boxSizing: "border-box" }}
-                        >
-                            <option value="">-- Sélectionner un client --</option>
-                           
-                            {clients.map((c) => (
-                                <option key={c.clientName} value={c.clientName}>{c.clientName}</option>
-                            ))}
-                        </select>
+                            placeholder="Tapez pour rechercher un client (ou saisir un nouveau nom)..."
+                            style={{ width: "100%", padding: "0.5rem 0.75rem", border: `1.5px solid ${fieldErrors.client ? COLORS.red : "#d1d5db"}`, borderRadius: 8, fontSize: "0.875rem", background: "#fff", outline: "none", boxSizing: "border-box" }}
+                        />
+                        <datalist id="segmentation-clients">
+                            {clients.map((c) => <option key={c.clientName} value={c.clientName} />)}
+                        </datalist>
+                        {fieldErrors.client && <div style={{ color: COLORS.red, fontSize: "0.72rem", marginTop: "0.25rem" }}>{fieldErrors.client}</div>}
+                        {isNewClient && selectedClient && (
+                            <div style={{ marginTop: "0.375rem", fontSize: "0.75rem", color: "#d97706" }}>
+                                ⚠️ Client non trouvé dans le référentiel — renseignez ses données RFM manuellement ci-dessous.
+                            </div>
+                        )}
                     </div>
 
                     <div style={{ height: 1, background: "#f3f4f6", marginBottom: "1.25rem" }} />
@@ -260,10 +326,12 @@ export default function SegmentationPredictor() {
                                         </label>
                                         <input
                                             type="number"
+                                            min={f.key === "marge_Moyenne" ? undefined : 0}
                                             value={rfmData[f.key] ?? 0}
                                             onChange={(e) => setRfmData((d) => ({ ...d, [f.key]: parseFloat(e.target.value) || 0 }))}
-                                            style={{ width: "100%", padding: "0.5rem 0.75rem", border: `1.5px solid ${rfmData.isExisting ? "#d1fae5" : "#fde68a"}`, borderRadius: 8, fontSize: "0.875rem", outline: "none", boxSizing: "border-box", background: rfmData.isExisting ? "#f0fdf4" : "#fffbeb" }}
+                                            style={{ width: "100%", padding: "0.5rem 0.75rem", border: `1.5px solid ${fieldErrors[f.key] ? COLORS.red : rfmData.isExisting ? "#d1fae5" : "#fde68a"}`, borderRadius: 8, fontSize: "0.875rem", outline: "none", boxSizing: "border-box", background: rfmData.isExisting ? "#f0fdf4" : "#fffbeb" }}
                                         />
+                                        {fieldErrors[f.key] && <div style={{ color: COLORS.red, fontSize: "0.72rem", marginTop: "0.25rem" }}>{fieldErrors[f.key]}</div>}
                                     </div>
                                 ))}
                             </div>
@@ -327,10 +395,10 @@ export default function SegmentationPredictor() {
                                 </div>
                                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
                                     {[
-                                        { label: "Récence", value: `${Math.round(isNewClient ? manualRfm.recence : rfmData?.recence || 0)} jours` },
-                                        { label: "Fréquence", value: `${Math.round(isNewClient ? manualRfm.frequence : rfmData?.frequence || 0)} factures` },
-                                        { label: "CA Total", value: `${parseFloat(isNewClient ? manualRfm.ca_total : rfmData?.ca_Total || 0).toLocaleString("fr-FR")} TND` },
-                                        { label: "Marge moy.", value: `${parseFloat(isNewClient ? manualRfm.marge_moyenne : rfmData?.marge_Moyenne || 0).toFixed(1)}%` },
+                                        { label: "Récence", value: `${Math.round(rfmData?.recence || 0)} jours` },
+                                        { label: "Fréquence", value: `${Math.round(rfmData?.frequence || 0)} factures` },
+                                        { label: "CA Total", value: `${parseFloat(rfmData?.ca_Total || 0).toLocaleString("fr-FR")} TND` },
+                                        { label: "Marge moy.", value: `${parseFloat(rfmData?.marge_Moyenne || 0).toFixed(1)}%` },
                                     ].map((kpi) => (
                                         <div key={kpi.label} style={{ textAlign: "center" }}>
                                             <div style={{ fontSize: "0.7rem", color: "#9ca3af" }}>{kpi.label}</div>
@@ -371,6 +439,7 @@ export default function SegmentationPredictor() {
                     )}
                 </div>
             </div>
+            )}
         </div>
     );
 }

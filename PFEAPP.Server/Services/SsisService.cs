@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using Microsoft.Data.SqlClient;
 using PFEAPP.Server.Models;
 
 namespace PFEAPP.Server.Services
@@ -7,18 +8,23 @@ namespace PFEAPP.Server.Services
     {
         private readonly string _projectPath;
         private readonly string _dtexecPath;
+        private readonly string _appDbConnectionString;
+        private readonly ILogger<SsisService> _logger;
 
-        // Log en mémoire — liste statique partagée entre les requêtes
+        // Log en mémoire — liste statique partagée entre les requêtes (cache rapide pour la session en cours)
         private static readonly List<ExecutionLog> _logs = new();
         private static int _logCounter = 0;
 
-        public SsisService(IConfiguration configuration)
+        public SsisService(IConfiguration configuration, ILogger<SsisService> logger)
         {
             _projectPath = configuration["Ssis:ProjectPath"]
                 ?? @"C:\Users\hp\source\repos\ETLPFE\ETLPFE";
 
             _dtexecPath = configuration["Ssis:DtexecPath"]
                 ?? @"C:\Program Files\Microsoft SQL Server\170\DTS\Binn\DTExec.exe";
+
+            _appDbConnectionString = configuration.GetConnectionString("AppDb") ?? "";
+            _logger = logger;
         }
 
         public List<ExecutionLog> GetLogs() => _logs.OrderByDescending(l => l.ExecutedAt).ToList();
@@ -62,7 +68,7 @@ namespace PFEAPP.Server.Services
                         ExecutedAt = startTime,
                         DurationSeconds = 600
                     };
-                    AddLog(timeoutResult, type);
+                    await AddLogAsync(timeoutResult, type);
                     return timeoutResult;
                 }
 
@@ -86,7 +92,7 @@ namespace PFEAPP.Server.Services
                     DurationSeconds = duration
                 };
 
-                AddLog(result, type);
+                await AddLogAsync(result, type);
                 return result;
             }
             catch (Exception ex)
@@ -99,7 +105,7 @@ namespace PFEAPP.Server.Services
                     ExecutedAt = startTime,
                     DurationSeconds = 0
                 };
-                AddLog(errorResult, type);
+                await AddLogAsync(errorResult, type);
                 return errorResult;
             }
         }
@@ -131,26 +137,52 @@ namespace PFEAPP.Server.Services
                 DurationSeconds = (int)(DateTime.Now - startTime).TotalSeconds
             };
 
-            AddLog(masterResult, "Master");
+            await AddLogAsync(masterResult, "Master");
             return masterResult;
         }
 
-        private void AddLog(EtlResult result, string type)
+        private async Task AddLogAsync(EtlResult result, string type)
         {
+            var effectiveType = string.IsNullOrEmpty(type) ? result.Package : type;
+
             _logs.Add(new ExecutionLog
             {
                 Id = ++_logCounter,
                 Package = result.Package,
-                Type = string.IsNullOrEmpty(type) ? result.Package : type,
+                Type = effectiveType,
                 Success = result.Success,
                 Message = result.Message,
                 ExecutedAt = result.ExecutedAt,
                 DurationSeconds = result.DurationSeconds
             });
 
-            // Garder les 50 derniers logs maximum
+            // Garder les 50 derniers logs maximum (cache en mémoire uniquement)
             if (_logs.Count > 50)
                 _logs.RemoveAt(0);
+
+            // Persistance durable dans PFEAPP_App (survit aux redémarrages) — une panne DB ici
+            // ne doit jamais faire échouer l'exécution ETL elle-même.
+            try
+            {
+                await using var conn = new SqlConnection(_appDbConnectionString);
+                await conn.OpenAsync();
+                await using var cmd = new SqlCommand(@"
+                    INSERT INTO ETL_EXECUTION_LOG (Package, Type, Success, Message, Output, Error, ExecutedAt, DurationSeconds)
+                    VALUES (@Package, @Type, @Success, @Message, @Output, @Error, @ExecutedAt, @DurationSeconds)", conn);
+                cmd.Parameters.AddWithValue("@Package", result.Package);
+                cmd.Parameters.AddWithValue("@Type", effectiveType);
+                cmd.Parameters.AddWithValue("@Success", result.Success);
+                cmd.Parameters.AddWithValue("@Message", result.Message);
+                cmd.Parameters.AddWithValue("@Output", (object?)result.Output ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@Error", (object?)result.Error ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@ExecutedAt", result.ExecutedAt);
+                cmd.Parameters.AddWithValue("@DurationSeconds", result.DurationSeconds);
+                await cmd.ExecuteNonQueryAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Impossible de persister le log ETL dans PFEAPP_App.");
+            }
         }
     }
 }

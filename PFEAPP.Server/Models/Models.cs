@@ -24,6 +24,7 @@
     {
         public double PctMargePredite { get; set; }
         public string Interpretation { get; set; } = "";
+        public List<string> Recommendations { get; set; } = new();
         public DateTime PredictedAt { get; set; }
     }
 

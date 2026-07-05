@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { setToken } from "../lib/api";
 
 const COLORS = {
     violet: "#3B1F8C",
@@ -9,12 +10,13 @@ const COLORS = {
 };
 
 export default function Login({ onLogin }) {
-    const [step, setStep] = useState("email"); // "email" | "password"
+    const [step, setStep] = useState("email"); // "email" | "password" | "forgot"
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
     const [showPwd, setShowPwd] = useState(false);
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
+    const [forgotMessage, setForgotMessage] = useState("");
 
     const handleEmailNext = () => {
         const trimmed = email.trim().toLowerCase();
@@ -46,9 +48,27 @@ export default function Login({ onLogin }) {
                 setLoading(false);
                 return;
             }
+            setToken(data.token);
             onLogin(data);
         } catch {
             setError("Erreur de connexion au serveur.");
+            setLoading(false);
+        }
+    };
+
+    const handleForgotPassword = async () => {
+        setLoading(true);
+        try {
+            const res = await fetch("/api/auth/forgot-password", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ email: email.trim() }),
+            });
+            const data = await res.json();
+            setForgotMessage(data.message || "Si cet email est associé à un compte, un lien de réinitialisation a été envoyé.");
+        } catch {
+            setForgotMessage("Erreur de connexion au serveur.");
+        } finally {
             setLoading(false);
         }
     };
@@ -103,7 +123,7 @@ export default function Login({ onLogin }) {
                         <div style={{ textAlign: "center", marginBottom: "2rem" }}>
                             <div style={{ width: 56, height: 56, borderRadius: 14, background: `linear-gradient(135deg, ${COLORS.violet}, ${COLORS.violetLight})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.5rem", margin: "0 auto 1rem", boxShadow: `0 8px 24px ${COLORS.violet}44` }}>🔐</div>
                             <h2 style={{ margin: "0 0 0.25rem", fontSize: "1.3rem", fontWeight: 800, color: COLORS.violetDark }}>
-                                {step === "email" ? "Connexion" : "Mot de passe"}
+                                {step === "email" ? "Connexion" : step === "forgot" ? "Mot de passe oublié" : "Mot de passe"}
                             </h2>
                             <p style={{ margin: 0, fontSize: "0.82rem", color: "#6b7280" }}>
                                 {step === "email" ? "Espace analytique Tandem Logistics" : email}
@@ -173,6 +193,41 @@ export default function Login({ onLogin }) {
                                     style={{ width: "100%", padding: "0.75rem", background: loading ? "#9ca3af" : COLORS.violet, color: "#fff", border: "none", borderRadius: 8, fontWeight: 700, fontSize: "0.9rem", cursor: loading ? "not-allowed" : "pointer" }}>
                                     {loading ? "⏳ Connexion..." : "Se connecter"}
                                 </button>
+
+                                <div style={{ textAlign: "center", marginTop: "1rem" }}>
+                                    <span onClick={() => { setStep("forgot"); setError(""); setForgotMessage(""); }}
+                                        style={{ fontSize: "0.8rem", color: COLORS.violet, cursor: "pointer", fontWeight: 600 }}>
+                                        Mot de passe oublié ?
+                                    </span>
+                                </div>
+                            </>
+                        )}
+
+                        {/* Étape mot de passe oublié */}
+                        {step === "forgot" && (
+                            <>
+                                <p style={{ fontSize: "0.82rem", color: "#6b7280", marginBottom: "1.25rem" }}>
+                                    Entrez votre adresse Tandem — un lien de réinitialisation sera envoyé à votre email Microsoft associé.
+                                </p>
+                                <div style={{ marginBottom: "1.25rem" }}>
+                                    <input
+                                        type="email" value={email} autoFocus
+                                        onChange={(e) => setEmail(e.target.value)}
+                                        placeholder="prenom@tandem.tn"
+                                        style={{ width: "100%", padding: "0.625rem 0.875rem", border: "1.5px solid #d1d5db", borderRadius: 8, fontSize: "0.9rem", outline: "none", boxSizing: "border-box", fontFamily: "'Segoe UI', sans-serif" }}
+                                    />
+                                </div>
+                                {forgotMessage && <div style={{ color: COLORS.violetDark, fontSize: "0.8rem", marginBottom: "1rem" }}>{forgotMessage}</div>}
+                                <button onClick={handleForgotPassword} disabled={loading || !email.trim()}
+                                    style={{ width: "100%", padding: "0.75rem", background: loading ? "#9ca3af" : COLORS.violet, color: "#fff", border: "none", borderRadius: 8, fontWeight: 700, fontSize: "0.9rem", cursor: loading ? "not-allowed" : "pointer", marginBottom: "0.75rem" }}>
+                                    {loading ? "⏳ Envoi..." : "Envoyer le lien"}
+                                </button>
+                                <div style={{ textAlign: "center" }}>
+                                    <span onClick={() => { setStep("password"); setForgotMessage(""); }}
+                                        style={{ fontSize: "0.8rem", color: "#6b7280", cursor: "pointer" }}>
+                                        ← Retour à la connexion
+                                    </span>
+                                </div>
                             </>
                         )}
 

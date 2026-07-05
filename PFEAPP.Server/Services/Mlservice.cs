@@ -49,6 +49,7 @@ namespace PFEAPP.Server.Services
             {
                 PctMargePredite = pctMarge,
                 Interpretation = Interpreter(pctMarge),
+                Recommendations = Recommend(pctMarge),
                 PredictedAt = DateTime.Now
             };
         }
@@ -82,6 +83,33 @@ namespace PFEAPP.Server.Services
             < 35 => "🟢 Marge correcte (20–35%)",
             < 60 => "✅ Bonne marge (35–60%)",
             _ => "🏆 Excellente marge (> 60%)"
+        };
+
+        private static List<string> Recommend(double pct) => pct switch
+        {
+            < 0 => new() {
+                "Renégocier le tarif de vente avec le client avant validation du dossier.",
+                "Vérifier les coûts d'achat et de fret associés — le dossier est actuellement déficitaire."
+            },
+            < 10 => new() {
+                "Marge sous le seuil de rentabilité cible — envisager une renégociation tarifaire.",
+                "Analyser les postes de coûts (fret, manutention) pour identifier des économies possibles."
+            },
+            < 20 => new() {
+                "Marge acceptable mais perfectible — surveiller les frais annexes (surestaries, stockage).",
+                "Comparer avec la marge moyenne du client pour valider la cohérence du tarif."
+            },
+            < 35 => new() {
+                "Marge conforme aux standards du secteur — dossier à valider normalement."
+            },
+            < 60 => new() {
+                "Bonne marge — dossier prioritaire, envisager de fidéliser ce type de client.",
+                "Capitaliser sur ce profil de dossier pour de futures négociations commerciales."
+            },
+            _ => new() {
+                "Excellente marge — vérifier la cohérence du tarif appliqué (risque de sur-facturation client).",
+                "Documenter les facteurs de succès pour les reproduire sur des dossiers similaires."
+            }
         };
     }
 }

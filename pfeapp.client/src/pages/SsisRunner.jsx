@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { apiFetch } from "../lib/api";
 
 const COLORS = {
     violet: "#3B1F8C",
@@ -39,7 +40,7 @@ export default function SsisRunner() {
     useEffect(() => {
         const loadTables = async (retries = 5) => {
             try {
-                const res = await fetch("/api/ssis/tables");
+                const res = await apiFetch("/api/ssis/tables");
                 if (!res.ok) throw new Error("Not ready");
                 const data = await res.json();
                 setTables(data);
@@ -54,7 +55,7 @@ export default function SsisRunner() {
     const fetchLogs = async () => {
         setLoadingLogs(true);
         try {
-            const res = await fetch("/api/ssis/logs");
+            const res = await apiFetch("/api/ssis/logs");
             const data = await res.json();
             setLogs(data);
         } catch { }
@@ -62,7 +63,7 @@ export default function SsisRunner() {
     };
 
     const clearLogs = async () => {
-        await fetch("/api/ssis/logs", { method: "DELETE" });
+        await apiFetch("/api/ssis/logs", { method: "DELETE" });
         setLogs([]);
     };
 
@@ -76,7 +77,7 @@ export default function SsisRunner() {
         setExecStatus((s) => ({ ...s, [type]: "running" }));
         setLastResult(null);
         try {
-            const res = await fetch(`/api/ssis/run/${type}`, { method: "POST" });
+            const res = await apiFetch(`/api/ssis/run/${type}`, { method: "POST" });
             const text = await res.text();
             if (!text || text.trim() === "") {
                 setExecStatus((s) => ({ ...s, [type]: "error" }));

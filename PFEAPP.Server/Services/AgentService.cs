@@ -1,6 +1,5 @@
 using System.Text;
 using System.Text.Json;
-using System.Diagnostics;
 using Microsoft.Data.SqlClient;
 
 namespace PFEAPP.Server.Services
@@ -21,42 +20,133 @@ namespace PFEAPP.Server.Services
 
     public class AgentService
     {
+        private const string AntiHallucinationRules = @"RÈGLES ANTI-HALLUCINATION (obligatoires) :
+- N'invente JAMAIS un chiffre, un nom de client/fournisseur/compte ou une donnée qui n'apparaît pas explicitement dans les données fournies ci-dessus.
+- Si la question porte sur une donnée absente du contexte fourni, réponds explicitement ""Je n'ai pas cette donnée disponible"" au lieu de deviner ou d'estimer.
+- Ne produis jamais un code d'action ou un nom de dashboard en dehors de la liste fixe autorisée.
+- En cas de doute sur un chiffre, préfère dire que l'information n'est pas disponible plutôt que d'approximer.";
+
         private readonly string _groqApiKey;
-        private readonly string _pythonExe;
-        private readonly string _mlScriptPath;
-        private readonly string _segScriptPath;
-        private readonly string _dtexecPath;
-        private readonly string _ssisProjectPath;
         private readonly string _connectionString;
         private readonly HttpClient _httpClient;
+        private readonly SsisService _ssisService;
 
-        public AgentService(IConfiguration configuration, IHttpClientFactory httpClientFactory)
+        public AgentService(IConfiguration configuration, IHttpClientFactory httpClientFactory, SsisService ssisService)
         {
             _groqApiKey = configuration["Groq:ApiKey"] ?? "";
-            _pythonExe = configuration["Ml:PythonExe"] ?? "python";
-            _mlScriptPath = @"C:\Users\hp\source\repos\PFEAPP\PFEAPP.Server\ml\predict.py";
-            _segScriptPath = @"C:\Users\hp\source\repos\PFEAPP\PFEAPP.Server\ml\predict_segment.py";
-            _dtexecPath = configuration["Ssis:DtexecPath"] ?? "dtexec";
-            _ssisProjectPath = configuration["Ssis:ProjectPath"] ?? "";
             _connectionString = configuration.GetConnectionString("DWH") ?? "";
             _httpClient = httpClientFactory.CreateClient();
+            _ssisService = ssisService;
         }
 
-        public async Task<AgentResponse> ProcessMessageAsync(string userMessage, List<AgentMessage> history, string activeDashboard = "")
+        // Mots-clés obligatoires pour qu'une exécution ETL soit réellement lancée : filet de sécurité
+        // déterministe car le LLM (petit modèle) classe parfois à tort un message vague ("analyse", "résume")
+        // comme une intention ETL, ce qui déclencherait un vrai dtexec sur le Data Warehouse à tort.
+        private static readonly string[] EtlKeywords =
+            { "etl", "dimension", "fait", "master", "aliment", "lance", "lancer", "exécut", "execut", "ssis", "charge" };
+
+        // Mots-clés désignant explicitement UN package précis. Si le message est bien une demande ETL
+        // (LooksLikeEtlRequest) mais ne cite aucun de ces mots, on ne devine JAMAIS le package (le LLM
+        // a tendance à choisir "dimensions" par défaut) : on demande explicitement lequel.
+        private static readonly string[] DimensionsKeywords = { "dimension" };
+        private static readonly string[] FaitsKeywords = { "fait" };
+        private static readonly string[] MasterKeywords = { "master", "complet", "complète", "tout" };
+
+        private static bool LooksLikeEtlRequest(string message)
+        {
+            var lower = message.ToLowerInvariant();
+            return EtlKeywords.Any(k => lower.Contains(k));
+        }
+
+        private static bool MentionsAny(string message, string[] keywords)
+        {
+            var lower = message.ToLowerInvariant();
+            return keywords.Any(k => lower.Contains(k));
+        }
+
+        private static AgentResponse AskWhichEtlPackage() => new()
+        {
+            Success = true,
+            ActionType = "ask_etl_package",
+            Message = "⚙️ Quel package souhaitez-vous exécuter ?\n\n- **Dimensions**\n- **Faits**\n- **Master** (alimentation complète)",
+            Data = new { packages = new[] { "dimensions", "faits", "master" } }
+        };
+
+        public async Task<AgentResponse> ProcessMessageAsync(string userMessage, List<AgentMessage> history, string activeDashboard = "", string role = "")
         {
             var intention = await DetectIntentionAsync(userMessage, activeDashboard);
+
+            if (intention is "run_etl_dimensions" or "run_etl_faits" or "run_etl_master")
+            {
+                if (!LooksLikeEtlRequest(userMessage))
+                {
+                    // Message ambigu classé à tort comme ETL par le LLM (ex: "logistique", "analyse") :
+                    // on retombe sur l'analyse du dashboard plutôt que de refuser à tort une exécution
+                    // qui n'a jamais été réellement demandée.
+                    intention = "analyse_dashboard";
+                }
+                else if (role != "ADMIN")
+                {
+                    // Le message est bien une vraie demande ETL, mais réservée à l'Administrateur —
+                    // cohérent avec la restriction serveur de SsisController.
+                    return new AgentResponse
+                    {
+                        Success = false,
+                        ActionType = "etl",
+                        Message = "🚫 L'exécution ETL est réservée aux administrateurs."
+                    };
+                }
+                else
+                {
+                    var mentionsDim = MentionsAny(userMessage, DimensionsKeywords);
+                    var mentionsFait = MentionsAny(userMessage, FaitsKeywords);
+                    var mentionsMaster = MentionsAny(userMessage, MasterKeywords);
+
+                    if (!mentionsDim && !mentionsFait && !mentionsMaster)
+                        return AskWhichEtlPackage();
+
+                    // Le message précise explicitement le package : on ne fait pas confiance aveuglément
+                    // au choix du LLM (biais observé vers "dimensions"), on l'aligne sur le mot-clé trouvé.
+                    if (mentionsMaster) intention = "run_etl_master";
+                    else if (mentionsDim) intention = "run_etl_dimensions";
+                    else if (mentionsFait) intention = "run_etl_faits";
+                }
+            }
 
             return intention switch
             {
                 "run_etl_dimensions" => await RunEtlAsync("dimensions.dtsx", "Dimensions"),
                 "run_etl_faits" => await RunEtlAsync("FactFinance.dtsx", "Faits"),
                 "run_etl_master" => await RunEtlMasterAsync(),
-                "predict_marge" => await HandlePredictMargeAsync(userMessage),
-                "segment_client" => await HandleSegmentAsync(userMessage),
-                "analyse_dashboard" => await AnalyseDashboardAsync(activeDashboard, userMessage),
+                "analyse_dashboard" => await AnalyseDashboardAsync(activeDashboard, userMessage, role),
                 "list_actions" => ListActions(),
                 "hors_scope" => HorsScope(),
                 _ => await ChatAsync(userMessage, history, activeDashboard)
+            };
+        }
+
+        private static readonly Dictionary<string, string> DashboardLabels = new()
+        {
+            ["home"] = "Accueil",
+            ["finance"] = "KPIs Financiers",
+            ["commercial"] = "Performance Commerciale",
+            ["frais"] = "Analyse Frais Dossiers",
+            ["logistique"] = "Suivi Logistique",
+            ["balance"] = "Balance Comptable",
+        };
+
+        private AgentResponse AskWhichDashboard(string role)
+        {
+            // "Accueil" n'est pas proposé comme dashboard analysable par l'agent (pour tous les rôles,
+            // y compris CEO) — ce n'est pas un dashboard métier avec des KPIs propres à analyser.
+            var allowed = RolePages.For(role).Where(d => d != "home").ToArray();
+            var options = string.Join("\n", allowed.Select(d => $"- **{DashboardLabels.GetValueOrDefault(d, d)}**"));
+            return new AgentResponse
+            {
+                Success = true,
+                ActionType = "ask_dashboard",
+                Message = $"📋 Quel dashboard souhaitez-vous que j'analyse ?\n\n{options}",
+                Data = new { dashboards = allowed }
             };
         }
 
@@ -71,17 +161,17 @@ Retourne UNIQUEMENT l'un de ces codes :
 - run_etl_dimensions  → lancer/exécuter/alimenter les dimensions SSIS
 - run_etl_faits       → lancer/exécuter/alimenter les faits SSIS
 - run_etl_master      → lancer master/alimentation complète SSIS
-- predict_marge       → prédire/calculer/estimer la marge d'un dossier
-- segment_client      → segmenter/classer un client RFM
-- analyse_dashboard   → analyser/résumer dashboard, questions sur CA/marge/coûts/KPIs/chiffres/données/statistiques
+- analyse_dashboard   → analyser/résumer dashboard, questions sur CA/marge/coûts/KPIs/chiffres/données/statistiques/comptes/solde/débit/crédit/balance/GL/écritures comptables/clients/fournisseurs/bookings/navires/ports (TOUTE question portant sur un chiffre ou une donnée métier de Tandem Logistics, quel que soit le domaine)
 - list_actions        → demander les capacités de l'agent
 - hors_scope          → météo, sport, politique, blagues, tout hors Tandem Logistics
 - chat                → questions générales sur logistique ou Tandem
 
 IMPORTANT :
 - Toute question sur chiffres/KPIs/données → analyse_dashboard
-- Prédire/segmenter sans chiffres → predict_marge ou segment_client
 - Hors Tandem Logistics → hors_scope
+- Ne retourne JAMAIS un code en dehors de cette liste fixe.
+
+{AntiHallucinationRules}
 
 Retourne UNIQUEMENT le code.";
 
@@ -95,103 +185,51 @@ Retourne UNIQUEMENT le code.";
             return r.Trim().ToLower().Replace(".", "").Replace(" ", "_");
         }
 
-        // ─── ETL ─────────────────────────────────────────────────────────────
+        // ─── ETL — délègue à SsisService (même code, même journal que l'onglet ETL Runner) ──
 
         private async Task<AgentResponse> RunEtlAsync(string packageName, string type)
         {
-            var psi = new ProcessStartInfo
+            var result = await _ssisService.ExecutePackageAsync(packageName, type);
+            return new AgentResponse
             {
-                FileName = _dtexecPath,
-                Arguments = $"/File \"{_ssisProjectPath}\\{packageName}\"",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
+                Success = result.Success,
+                ActionType = "etl",
+                Message = result.Success
+                    ? $"✅ Package **{type}** exécuté avec succès en **{result.DurationSeconds} secondes**."
+                    : $"❌ {result.Message}",
+                Data = new { package = result.Package, duration = result.DurationSeconds, success = result.Success }
             };
-
-            try
-            {
-                var startTime = DateTime.Now;
-                using var process = new Process { StartInfo = psi };
-                process.Start();
-
-                var outTask = process.StandardOutput.ReadToEndAsync();
-                var errTask = process.StandardError.ReadToEndAsync();
-                var timeout = Task.Delay(TimeSpan.FromMinutes(10));
-                var done = await Task.WhenAny(Task.WhenAll(outTask, errTask), timeout);
-
-                if (done == timeout) { process.Kill(); return new AgentResponse { Success = false, ActionType = "etl", Message = "⏱️ Timeout — package dépassé 10 minutes." }; }
-
-                await process.WaitForExitAsync();
-                var dur = (int)(DateTime.Now - startTime).TotalSeconds;
-                var success = process.ExitCode == 0;
-
-                return new AgentResponse
-                {
-                    Success = success,
-                    ActionType = "etl",
-                    Message = success
-                        ? $"✅ Package **{type}** exécuté avec succès en **{dur} secondes**."
-                        : $"❌ Échec du package {type} (code {process.ExitCode}).",
-                    Data = new { package = packageName, duration = dur, success }
-                };
-            }
-            catch (Exception ex)
-            {
-                return new AgentResponse { Success = false, ActionType = "etl", Message = $"❌ Erreur : {ex.Message}" };
-            }
         }
 
         private async Task<AgentResponse> RunEtlMasterAsync()
         {
-            var dim = await RunEtlAsync("dimensions.dtsx", "Dimensions");
-            if (!dim.Success) return dim;
-            var fait = await RunEtlAsync("FactFinance.dtsx", "Faits");
-            if (!fait.Success) return fait;
+            var result = await _ssisService.ExecuteMasterAsync();
             return new AgentResponse
             {
-                Success = true,
+                Success = result.Success,
                 ActionType = "etl",
-                Message = "✅ Alimentation complète réussie !\n\n📐 **Dimensions** chargées\n📊 **Faits** chargés\n\nLe Data Warehouse est à jour."
+                Message = result.Success
+                    ? "✅ Alimentation complète réussie !\n\n📐 **Dimensions** chargées\n📊 **Faits** chargés\n\nLe Data Warehouse est à jour."
+                    : $"❌ {result.Message}",
+                Data = new { duration = result.DurationSeconds, success = result.Success }
             };
-        }
-
-        // ─── ML interactif ───────────────────────────────────────────────────
-
-        private async Task<AgentResponse> HandlePredictMargeAsync(string message)
-        {
-            if (!message.Any(char.IsDigit))
-                return new AgentResponse
-                {
-                    Success = true,
-                    ActionType = "predict_marge",
-                    Message = "🔮 Pour prédire la marge, j'ai besoin de :\n\n" +
-                              "1️⃣ **Montant Vente Total** (TND)\n2️⃣ **Nom du client**\n" +
-                              "3️⃣ **Nombre de conteneurs**\n4️⃣ **Port origine** (ex: TNTUN)\n5️⃣ **Port destination**\n\n" +
-                              "Exemple : *\"Prédit la marge pour CRANE WORLDWIDE, 50000 TND, 3 conteneurs, TNTUN vers FRMRS\"*"
-                };
-            return await PredictMargeFromMessageAsync(message);
-        }
-
-        private async Task<AgentResponse> HandleSegmentAsync(string message)
-        {
-            if (!message.Any(char.IsDigit))
-                return new AgentResponse
-                {
-                    Success = true,
-                    ActionType = "segment",
-                    Message = "🎯 Pour segmenter un client, j'ai besoin de :\n\n" +
-                              "1️⃣ **Nom du client**\n2️⃣ **Récence** (jours)\n" +
-                              "3️⃣ **Fréquence** (nb factures)\n4️⃣ **CA Total** (TND)\n\n" +
-                              "Exemple : *\"Segmente CRANE WORLDWIDE, récence 30 jours, 25 factures, CA 800000\"*"
-                };
-            return await SegmentClientFromMessageAsync(message);
         }
 
         // ─── RAG — Analyse Dashboard ─────────────────────────────────────────
 
-        private async Task<AgentResponse> AnalyseDashboardAsync(string dashboard, string question)
+        private async Task<AgentResponse> AnalyseDashboardAsync(string dashboard, string question, string role)
         {
+            if (string.IsNullOrEmpty(dashboard))
+                return AskWhichDashboard(role);
+
+            if (!RolePages.CanAccess(role, dashboard))
+                return new AgentResponse
+                {
+                    Success = false,
+                    ActionType = "analyse_dashboard",
+                    Message = "🚫 Vous n'avez pas accès à ce dashboard avec votre rôle actuel."
+                };
+
             try
             {
                 var kpis = await GetDashboardKpisAsync(dashboard);
@@ -205,7 +243,9 @@ Données réelles du Data Warehouse :
 Question : {question}
 
 Réponds en français, professionnel et concis. Utilise UNIQUEMENT les données ci-dessus.
-Formate les montants avec séparateurs de milliers. Ne génère pas de données fictives.";
+Formate les montants avec séparateurs de milliers.
+
+{AntiHallucinationRules}";
 
                 var msgs = new List<object> { new { role = "system", content = prompt } };
                 var response = await CallGroqAsync(msgs, maxTokens: 600);
@@ -233,7 +273,7 @@ Formate les montants avec séparateurs de milliers. Ne génère pas de données 
             await conn.OpenAsync();
 
             // ── FINANCE ──────────────────────────────────────────────────────
-            if (dashboard is "finance" or "home" || string.IsNullOrEmpty(dashboard))
+            if (dashboard is "finance" or "home")
             {
                 sb.AppendLine("=== KPIs FINANCIERS ===");
 
@@ -283,6 +323,15 @@ Formate les montants avec séparateurs de milliers. Ne génère pas de données 
                       AND c.CountryCode IS NOT NULL AND c.CountryCode != ''
                     GROUP BY c.CountryCode ORDER BY CA DESC",
                     r => sb.AppendLine($"  - {r.GetString(0)} : {Convert.ToDouble(r.GetValue(1)):N0} TND"));
+
+                sb.AppendLine("Évolution Mensuelle du CA :");
+                await RunQueryList(conn, sb, @"
+                    SELECT d.Year, d.Month, d.MonthName, SUM(v.MontantHT) AS CA
+                    FROM FACT_FACTURE_VENTE v INNER JOIN DIM_DATE d ON v.DateKey = d.DateKey
+                    WHERE v.MontantHT > 0 AND v.DocumentType = 'Invoice'
+                    GROUP BY d.Year, d.Month, d.MonthName
+                    ORDER BY d.Year, d.Month",
+                    r => sb.AppendLine($"  - {r.GetString(2)} {Convert.ToInt32(r.GetValue(0))} : {Convert.ToDouble(r.GetValue(3)):N0} TND"));
             }
 
             // ── BALANCE COMPTABLE ─────────────────────────────────────────────
@@ -319,29 +368,29 @@ Formate les montants avec séparateurs de milliers. Ne génère pas de données 
 
                 sb.AppendLine("Solde Net par Nature Comptable :");
                 await RunQueryList(conn, sb, @"
-                    SELECT 
-                        CASE 
-                            WHEN LEFT(g.NumCompte, 2) = '15' THEN 'Passif - Provisions'
-                            WHEN LEFT(g.NumCompte, 2) = '16' THEN 'Actif - Immobilisations'
-                            WHEN LEFT(g.NumCompte, 2) IN ('10','11') THEN 'Capitaux propres'
-                            WHEN LEFT(g.NumCompte, 2) = '12' THEN 'Résultat'
-                            WHEN LEFT(g.NumCompte, 1) = '6' THEN 'Charges'
-                            WHEN LEFT(g.NumCompte, 1) = '7' THEN 'Produits'
-                            WHEN LEFT(g.NumCompte, 1) = '1' THEN 'Bilan (Autre)'
+                    SELECT
+                        CASE LEFT(g.GLAccountNo, 1)
+                            WHEN '1' THEN 'Classe 1 - Capitaux propres'
+                            WHEN '2' THEN 'Classe 2 - Immobilisations'
+                            WHEN '3' THEN 'Classe 3 - Stocks'
+                            WHEN '4' THEN 'Classe 4 - Tiers'
+                            WHEN '5' THEN 'Classe 5 - Financier'
+                            WHEN '6' THEN 'Classe 6 - Charges'
+                            WHEN '7' THEN 'Classe 7 - Produits'
                             ELSE 'Autre'
                         END AS NatureComptable,
                         SUM(e.MontantDebit) - SUM(e.MontantCredit) AS SoldeNet
                     FROM FACT_ECRITURE_COMPTABLE e
                     INNER JOIN DIM_COMPTE_GL g ON e.CompteKey = g.CompteKey
-                    GROUP BY 
-                        CASE 
-                            WHEN LEFT(g.NumCompte, 2) = '15' THEN 'Passif - Provisions'
-                            WHEN LEFT(g.NumCompte, 2) = '16' THEN 'Actif - Immobilisations'
-                            WHEN LEFT(g.NumCompte, 2) IN ('10','11') THEN 'Capitaux propres'
-                            WHEN LEFT(g.NumCompte, 2) = '12' THEN 'Résultat'
-                            WHEN LEFT(g.NumCompte, 1) = '6' THEN 'Charges'
-                            WHEN LEFT(g.NumCompte, 1) = '7' THEN 'Produits'
-                            WHEN LEFT(g.NumCompte, 1) = '1' THEN 'Bilan (Autre)'
+                    GROUP BY
+                        CASE LEFT(g.GLAccountNo, 1)
+                            WHEN '1' THEN 'Classe 1 - Capitaux propres'
+                            WHEN '2' THEN 'Classe 2 - Immobilisations'
+                            WHEN '3' THEN 'Classe 3 - Stocks'
+                            WHEN '4' THEN 'Classe 4 - Tiers'
+                            WHEN '5' THEN 'Classe 5 - Financier'
+                            WHEN '6' THEN 'Classe 6 - Charges'
+                            WHEN '7' THEN 'Classe 7 - Produits'
                             ELSE 'Autre'
                         END
                     ORDER BY ABS(SUM(e.MontantDebit) - SUM(e.MontantCredit)) DESC",
@@ -349,12 +398,12 @@ Formate les montants avec séparateurs de milliers. Ne génère pas de données 
 
                 sb.AppendLine("Top 5 Comptes GL :");
                 await RunQueryList(conn, sb, @"
-                    SELECT TOP 5 g.NumCompte, g.LibelleCompte,
+                    SELECT TOP 5 g.GLAccountNo, g.GLAccountName,
                            SUM(e.MontantDebit) AS Debit,
                            SUM(e.MontantCredit) AS Credit
                     FROM FACT_ECRITURE_COMPTABLE e
                     INNER JOIN DIM_COMPTE_GL g ON e.CompteKey = g.CompteKey
-                    GROUP BY g.NumCompte, g.LibelleCompte
+                    GROUP BY g.GLAccountNo, g.GLAccountName
                     ORDER BY ABS(SUM(e.MontantDebit) - SUM(e.MontantCredit)) DESC",
                     r => {
                         var d = Convert.ToDouble(r.GetValue(2));
@@ -522,8 +571,7 @@ Formate les montants avec séparateurs de milliers. Ne génère pas de données 
                            SUM(MontantAchatTotalDS)      AS FraisAchat,
                            SUM(Marge)                   AS MargeFreis,
                            AVG(PctMarge)                AS PctMargeMoy
-                    FROM FACT_FRAIS_DOSSIER
-                    WHERE MontantAchatTotalDS > 0 AND PctMarge < 200 AND PctMarge > -50",
+                    FROM FACT_FRAIS_DOSSIER",
                     r => {
                         var nb = Convert.ToInt32(r.GetValue(0));
                         var vente = Convert.ToDouble(r.GetValue(1));
@@ -554,7 +602,6 @@ Formate les montants avec séparateurs de milliers. Ne génère pas de données 
                            COUNT(DISTINCT f.NoDossier) AS NbDossiers
                     FROM FACT_FRAIS_DOSSIER f
                     INNER JOIN DIM_CLIENT c ON f.ClientKey = c.ClientKey
-                    WHERE f.MontantAchatTotalDS > 0 AND f.PctMarge < 200 AND f.PctMarge > -50
                     GROUP BY c.ClientName ORDER BY Marge DESC",
                     r => sb.AppendLine($"  - {r.GetString(0)} : Vente={Convert.ToDouble(r.GetValue(1)):N0} | Achat={Convert.ToDouble(r.GetValue(2)):N0} | Marge={Convert.ToDouble(r.GetValue(4)):N0} TND | {Convert.ToDouble(r.GetValue(3)):F1}% | {Convert.ToInt32(r.GetValue(5))} dossiers"));
 
@@ -596,101 +643,27 @@ Formate les montants avec séparateurs de milliers. Ne génère pas de données 
             catch (Exception ex) { sb.AppendLine($"[Erreur : {ex.Message}]"); }
         }
 
-        // ─── ML Prédiction ───────────────────────────────────────────────────
-
-        private async Task<AgentResponse> PredictMargeFromMessageAsync(string message)
-        {
-            var extractPrompt = $@"Extrait les paramètres du message et retourne JSON valide UNIQUEMENT :
-{{""MontantVenteTotalDS"":0,""NbConteneurs"":0,""PoidsBrutTotal"":0,""ClientName"":""INCONNU"",""CountryCode"":""TN"",""CustomerPostingGroup"":""LOCAL"",""DesignationNavire"":""INCONNU"",""PortOrigine"":""TNTUN"",""PortDestination"":""TNTUN"",""TypeConteneurPrincipal"":""20'DC"",""IsPorteConteneurs"":0,""HasDangereux"":0}}
-Message : {message}";
-
-            var msgs = new List<object> { new { role = "system", content = "Retourne uniquement JSON valide sans markdown." }, new { role = "user", content = extractPrompt } };
-            var jsonStr = await CallGroqAsync(msgs, maxTokens: 300);
-
-            try
-            {
-                var clean = jsonStr.Replace("```json", "").Replace("```", "").Trim();
-                var features = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(clean) ?? new();
-                var escaped = JsonSerializer.Serialize(features).Replace("\"", "\\\"");
-
-                var psi = new ProcessStartInfo { FileName = _pythonExe, Arguments = $"\"{_mlScriptPath}\" \"{escaped}\"", RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
-                using var process = new Process { StartInfo = psi };
-                process.Start();
-                var stdout = await process.StandardOutput.ReadToEndAsync();
-                await process.WaitForExitAsync();
-
-                var output = JsonSerializer.Deserialize<JsonElement>(stdout.Trim());
-                var pctMarge = output.GetProperty("pct_marge").GetDouble();
-                var interp = pctMarge switch { < 0 => "⚠️ Marge négative", < 10 => "🔴 Très faible", < 20 => "🟡 Faible", < 35 => "🟢 Correcte", < 60 => "✅ Bonne", _ => "🏆 Excellente" };
-
-                return new AgentResponse { Success = true, ActionType = "predict_marge", Message = $"🔮 **Marge prédite : {pctMarge:F1}%**\n\n{interp}", Data = new { pctMarge } };
-            }
-            catch (Exception ex) { return new AgentResponse { Success = false, ActionType = "predict_marge", Message = $"❌ Erreur : {ex.Message}" }; }
-        }
-
-        // ─── ML Segmentation ─────────────────────────────────────────────────
-
-        private async Task<AgentResponse> SegmentClientFromMessageAsync(string message)
-        {
-            var extractPrompt = $@"Extrait RFM du message, retourne JSON valide UNIQUEMENT :
-{{""ClientName"":""Inconnu"",""Recence"":180,""Frequence"":5,""CA_Total"":50000,""Marge_Moyenne"":20}}
-Message : {message}";
-
-            var msgs = new List<object> { new { role = "system", content = "JSON valide uniquement sans markdown." }, new { role = "user", content = extractPrompt } };
-            var jsonStr = await CallGroqAsync(msgs, maxTokens: 200);
-
-            try
-            {
-                var clean = jsonStr.Replace("```json", "").Replace("```", "").Trim();
-                var data = JsonSerializer.Deserialize<JsonElement>(clean);
-                var client = data.TryGetProperty("ClientName", out var cn) ? cn.GetString() ?? "Inconnu" : "Inconnu";
-
-                var inputJson = JsonSerializer.Serialize(new
-                {
-                    Recence = data.TryGetProperty("Recence", out var r) ? r.GetDouble() : 180,
-                    Frequence = data.TryGetProperty("Frequence", out var f) ? f.GetDouble() : 5,
-                    CA_Total = data.TryGetProperty("CA_Total", out var c) ? c.GetDouble() : 50000,
-                    Marge_Moyenne = data.TryGetProperty("Marge_Moyenne", out var m) ? m.GetDouble() : 20
-                });
-
-                var escaped = inputJson.Replace("\"", "\\\"");
-                var psi = new ProcessStartInfo { FileName = _pythonExe, Arguments = $"\"{_segScriptPath}\" \"{escaped}\"", RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
-                using var process = new Process { StartInfo = psi };
-                process.Start();
-                var stdout = await process.StandardOutput.ReadToEndAsync();
-                await process.WaitForExitAsync();
-
-                var output = JsonSerializer.Deserialize<JsonElement>(stdout.Trim());
-                var segment = output.GetProperty("segment").GetString() ?? "Inconnu";
-                var reco = output.GetProperty("recommendation").GetProperty("action").GetString() ?? "";
-                var icon = segment switch { "VIP" => "👑", "Fidèle" => "⭐", "À risque" => "⚠️", _ => "📉" };
-
-                return new AgentResponse { Success = true, ActionType = "segment", Message = $"{icon} **{client}** → Segment **{segment}**\n\n🎯 {reco}", Data = new { client, segment } };
-            }
-            catch (Exception ex) { return new AgentResponse { Success = false, ActionType = "segment", Message = $"❌ Erreur : {ex.Message}" }; }
-        }
-
         // ─── Utilitaires ─────────────────────────────────────────────────────
 
         private AgentResponse HorsScope() => new()
         {
             Success = true,
             ActionType = "hors_scope",
-            Message = "🚫 Je suis limité aux données **Tandem Logistics**.\n\nJe peux vous aider avec :\n- 📊 Analyse dashboards Power BI\n- ⚙️ Alimentation DWH\n- 🔮 Prédiction marge\n- 🎯 Segmentation clients"
+            Message = "🚫 Je suis limité aux données **Tandem Logistics**.\n\nJe peux vous aider avec :\n- 📊 Analyse dashboards Power BI\n- ⚙️ Alimentation DWH"
         };
 
         private AgentResponse ListActions() => new()
         {
             Success = true,
             ActionType = "list",
-            Message = "🤖 **Mes capacités :**\n\n⚙️ **ETL** : \"Lance les dimensions\" / \"Alimente les faits\" / \"Lance le master\"\n\n📊 **Analyse dashboard (RAG)** : \"Quel est le CA total ?\" / \"Top clients ?\" / \"Surestaries ?\"\n\n🔮 **Prédiction marge** : \"Prédit la marge pour CRANE, 50000 TND, 3 conteneurs\"\n\n🎯 **Segmentation** : \"Segmente HALLIBURTON, récence 45 jours, CA 800000\""
+            Message = "🤖 **Mes capacités :**\n\n⚙️ **ETL** : \"Lance les dimensions\" / \"Alimente les faits\" / \"Lance le master\"\n\n📊 **Analyse dashboard (RAG)** : \"Quel est le CA total ?\" / \"Top clients ?\" / \"Surestaries ?\""
         };
 
         private async Task<AgentResponse> ChatAsync(string message, List<AgentMessage> history, string dashboard)
         {
             var msgs = new List<object>
             {
-                new { role = "system", content = $"Tu es un assistant BI pour Tandem Logistics (freight forwarding tunisien). Dashboard : {dashboard}. Réponds en français, concis. Refuse les questions hors logistique." }
+                new { role = "system", content = $"Tu es un assistant BI pour Tandem Logistics (freight forwarding tunisien). Dashboard : {dashboard}. Réponds en français, concis. Refuse les questions hors logistique.\nTu n'as accès à AUCUNE donnée chiffrée réelle dans ce mode de conversation générale. Si la question porte sur un chiffre, un montant, un compte ou une statistique précise, ne réponds JAMAIS avec un nombre inventé : dis explicitement que tu as besoin de savoir quel dashboard analyser pour donner une réponse basée sur de vraies données.\nTu ne peux PAS effectuer de prédiction de marge ni de segmentation client via cette conversation (cette capacité a été retirée de l'agent). Si on te le demande, ne pose AUCUNE question de collecte de données et redirige simplement vers les modules dédiés « Prédiction IA » et « Segmentation Clients » de l'application.\n\n{AntiHallucinationRules}" }
             };
             foreach (var h in history.TakeLast(6))
                 msgs.Add(new { role = h.Role, content = h.Content });

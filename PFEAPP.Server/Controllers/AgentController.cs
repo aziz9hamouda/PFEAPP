@@ -1,3 +1,5 @@
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using PFEAPP.Server.Services;
 
@@ -12,6 +14,7 @@ namespace PFEAPP.Server.Controllers
 
     [ApiController]
     [Route("api/[controller]")]
+    [Authorize]
     public class AgentController : ControllerBase
     {
         private readonly AgentService _agentService;
@@ -29,10 +32,12 @@ namespace PFEAPP.Server.Controllers
 
             try
             {
+                var role = User.FindFirstValue(ClaimTypes.Role) ?? "";
                 var response = await _agentService.ProcessMessageAsync(
                     request.Message,
                     request.History,
-                    request.ActiveDashboard
+                    request.ActiveDashboard,
+                    role
                 );
                 return Ok(response);
             }

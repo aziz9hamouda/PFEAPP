@@ -5,7 +5,11 @@ import PowerBiDash from "./pages/PowerBiDash";
 import "./App.css";
 import MlPredictor from "./pages/MlPredictor";
 import SegmentationPredictor from "./pages/SegmentationPredictor";
-import AiAgent from "./pages/AiAgent";
+import UserManagement from "./pages/admin/UserManagement";
+import EtlHistory from "./pages/admin/EtlHistory";
+import ResetPassword from "./pages/ResetPassword";
+import AgentWidget from "./components/AgentWidget";
+import { clearToken } from "./lib/api";
 
 const COLORS = {
     violet: "#3B1F8C",
@@ -13,9 +17,45 @@ const COLORS = {
     lightViolet: "#EDE9F8",
 };
 
+// Topbar + bouton retour partagés par toutes les pages internes (hors login/modules)
+function PageShell({ title, user, onBack, onLogout, children }) {
+    return (
+        <div>
+            <div style={{
+                background: COLORS.violet, padding: "0 2rem",
+                height: 60, display: "flex", alignItems: "center",
+                justifyContent: "space-between",
+                boxShadow: "0 2px 8px rgba(59,31,140,0.3)",
+                fontFamily: "'Segoe UI', sans-serif"
+            }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                    <button onClick={onBack} style={{
+                        background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)",
+                        color: "#fff", borderRadius: 6, padding: "0.375rem 0.75rem",
+                        cursor: "pointer", fontSize: "0.85rem", fontWeight: 500
+                    }}>← Retour</button>
+                    <div style={{ width: 1, height: 24, background: "rgba(255,255,255,0.2)" }} />
+                    <div style={{ width: 32, height: 32, borderRadius: 8, background: COLORS.red, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: "0.9rem" }}>D</div>
+                    <span style={{ color: "#fff", fontWeight: 700 }}>Dynamix Services</span>
+                    <span style={{ color: "rgba(255,255,255,0.4)" }}>|</span>
+                    <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>{title}</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <span style={{ color: "#fff", fontSize: "0.85rem" }}>{user?.displayName}</span>
+                    <button onClick={onLogout} style={{ padding: "0.375rem 0.875rem", borderRadius: 6, background: "rgba(255,255,255,0.1)", color: "#fff", border: "1px solid rgba(255,255,255,0.2)", fontSize: "0.8rem", cursor: "pointer" }}>
+                        Déconnexion
+                    </button>
+                </div>
+            </div>
+            {children}
+        </div>
+    );
+}
+
 // Page de sélection du module après connexion
 function ModuleSelector({ user, onSelect, onLogout }) {
     const [hovering, setHovering] = useState(null);
+    const isAdmin = user?.roleCode === "ADMIN";
 
     const modules = [
         {
@@ -24,7 +64,7 @@ function ModuleSelector({ user, onSelect, onLogout }) {
             title: "ETL Runner",
             desc: "Alimenter le Data Warehouse via les packages SSIS",
             color: COLORS.violet,
-            available: true,
+            available: isAdmin, // réservé à l'Administrateur
         },
         {
             id: "powerbi",
@@ -32,7 +72,7 @@ function ModuleSelector({ user, onSelect, onLogout }) {
             title: "Dashboards Power BI",
             desc: "KPIs financiers, logistique & analyse des frais dossiers",
             color: "#0078d4",
-            available: true, // à brancher plus tard
+            available: true,
         },
         {
             id: "ml",
@@ -40,7 +80,7 @@ function ModuleSelector({ user, onSelect, onLogout }) {
             title: "Prédiction IA",
             desc: "Modèle XGBoost de prédiction de marge brute",
             color: COLORS.red,
-            available: true, // à brancher plus tard
+            available: true,
         },
         {
             id: "segmentation",
@@ -48,17 +88,25 @@ function ModuleSelector({ user, onSelect, onLogout }) {
             title: "Segmentation Clients",
             desc: "Modèle RFM K-Means — 4 segments clients",
             color: "#C0392B",
-            available: true,
+            available: user?.roleCode !== "LOG",
         },
         {
-            id: "agent",
-            icon: "🤖",
-            title: "Agent IA",
-            desc: "Assistant intelligent — ETL, prédictions, segmentation",
-            color: "#3B1F8C",
-            available: true,
+            id: "admin-users",
+            icon: "👥",
+            title: "Gestion Utilisateurs",
+            desc: "Comptes Tandem Logistics — activer/désactiver",
+            color: "#0f766e",
+            available: isAdmin,
         },
-    ];
+        {
+            id: "admin-etl",
+            icon: "📜",
+            title: "Historique ETL",
+            desc: "Exécutions passées, logs détaillés, relance de packages",
+            color: "#7c3aed",
+            available: isAdmin,
+        },
+    ].filter((m) => isAdmin || !m.id.startsWith("admin-"));
 
     return (
         <div style={{
@@ -81,7 +129,7 @@ function ModuleSelector({ user, onSelect, onLogout }) {
                 <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                         <div style={{ width: 32, height: 32, borderRadius: "50%", background: "rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.9rem" }}>👤</div>
-                        <span style={{ color: "#fff", fontSize: "0.85rem", fontWeight: 500 }}>{user?.name || "Utilisateur"}</span>
+                        <span style={{ color: "#fff", fontSize: "0.85rem", fontWeight: 500 }}>{user?.displayName || "Utilisateur"}</span>
                     </div>
                     <button onClick={onLogout} style={{
                         padding: "0.375rem 0.875rem", borderRadius: 6,
@@ -95,7 +143,7 @@ function ModuleSelector({ user, onSelect, onLogout }) {
             </div>
 
             {/* Contenu */}
-            <div style={{ maxWidth: 900, margin: "0 auto", padding: "4rem 2rem" }}>
+            <div style={{ maxWidth: 1100, margin: "0 auto", padding: "4rem 2rem" }}>
                 <div style={{ textAlign: "center", marginBottom: "3rem" }}>
                     <h1 style={{ margin: "0 0 0.75rem", fontSize: "2rem", fontWeight: 800, color: COLORS.violet }}>
                         Choisissez votre module
@@ -140,7 +188,7 @@ function ModuleSelector({ user, onSelect, onLogout }) {
                                     background: "#f3f4f6", color: "#9ca3af",
                                     fontSize: "0.72rem", fontWeight: 600
                                 }}>
-                                    Bientôt disponible
+                                    Non disponible pour votre rôle
                                 </div>
                             )}
                             {mod.available && (
@@ -163,17 +211,33 @@ function ModuleSelector({ user, onSelect, onLogout }) {
     );
 }
 
+const PAGES = {
+    etl: { title: "ETL Runner", Component: SsisRunner },
+    ml: { title: "Prediction", Component: MlPredictor },
+    segmentation: { title: "Segmentation", Component: SegmentationPredictor },
+    "admin-users": { title: "Gestion Utilisateurs", Component: UserManagement },
+    "admin-etl": { title: "Historique ETL", Component: EtlHistory },
+};
+
 export default function App() {
-    const [page, setPage] = useState("login"); // "login" | "modules" | "etl" | "powerbi" | "ml"
+    const [page, setPage] = useState("login");
     const [user, setUser] = useState(null);
+    const [activeDashboard, setActiveDashboard] = useState("");
+
+    // Lien emailé (mot de passe oublié) : accessible directement, sans login préalable.
+    if (window.location.pathname === "/reset-password") {
+        return <ResetPassword />;
+    }
 
     const handleLogin = (userData) => {
-        setUser(userData || { name: "Utilisateur Tandem" });
+        setUser(userData || { displayName: "Utilisateur Tandem" });
         setPage("modules");
     };
 
     const handleLogout = () => {
+        clearToken();
         setUser(null);
+        setActiveDashboard("");
         setPage("login");
     };
 
@@ -182,173 +246,29 @@ export default function App() {
     };
 
     const handleBackToModules = () => {
+        setActiveDashboard("");
         setPage("modules");
     };
+
+    const simplePage = PAGES[page];
 
     return (
         <>
             {page === "login" && <Login onLogin={handleLogin} />}
             {page === "modules" && <ModuleSelector user={user} onSelect={handleSelectModule} onLogout={handleLogout} />}
-            {page === "etl" && (
-                <div>
-                    {/* Topbar avec retour */}
-                    <div style={{
-                        background: COLORS.violet, padding: "0 2rem",
-                        height: 60, display: "flex", alignItems: "center",
-                        justifyContent: "space-between",
-                        boxShadow: "0 2px 8px rgba(59,31,140,0.3)",
-                        fontFamily: "'Segoe UI', sans-serif"
-                    }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                            <button onClick={handleBackToModules} style={{
-                                background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)",
-                                color: "#fff", borderRadius: 6, padding: "0.375rem 0.75rem",
-                                cursor: "pointer", fontSize: "0.85rem", fontWeight: 500
-                            }}>← Retour</button>
-                            <div style={{ width: 1, height: 24, background: "rgba(255,255,255,0.2)" }} />
-                            <div style={{ width: 32, height: 32, borderRadius: 8, background: COLORS.red, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: "0.9rem" }}>D</div>
-                            <span style={{ color: "#fff", fontWeight: 700 }}>Dynamix Services</span>
-                            <span style={{ color: "rgba(255,255,255,0.4)" }}>|</span>
-                            <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>ETL Runner</span>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                            <span style={{ color: "#fff", fontSize: "0.85rem" }}>{user?.name}</span>
-                            <button onClick={handleLogout} style={{ padding: "0.375rem 0.875rem", borderRadius: 6, background: "rgba(255,255,255,0.1)", color: "#fff", border: "1px solid rgba(255,255,255,0.2)", fontSize: "0.8rem", cursor: "pointer" }}>
-                                Déconnexion
-                            </button>
-                        </div>
-                    </div>
-                    <SsisRunner />
-                </div>
+            {simplePage && (
+                <PageShell title={simplePage.title} user={user} onBack={handleBackToModules} onLogout={handleLogout}>
+                    <simplePage.Component />
+                </PageShell>
             )}
             {page === "powerbi" && (
-                <div>
-                    {/* Topbar identique à ETL avec bouton retour */}
-                    {/* Topbar avec retour */}
-                    <div style={{
-                        background: COLORS.violet, padding: "0 2rem",
-                        height: 60, display: "flex", alignItems: "center",
-                        justifyContent: "space-between",
-                        boxShadow: "0 2px 8px rgba(59,31,140,0.3)",
-                        fontFamily: "'Segoe UI', sans-serif"
-                    }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                            <button onClick={handleBackToModules} style={{
-                                background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)",
-                                color: "#fff", borderRadius: 6, padding: "0.375rem 0.75rem",
-                                cursor: "pointer", fontSize: "0.85rem", fontWeight: 500
-                            }}>← Retour</button>
-                            <div style={{ width: 1, height: 24, background: "rgba(255,255,255,0.2)" }} />
-                            <div style={{ width: 32, height: 32, borderRadius: 8, background: COLORS.red, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: "0.9rem" }}>D</div>
-                            <span style={{ color: "#fff", fontWeight: 700 }}>Dynamix Services</span>
-                            <span style={{ color: "rgba(255,255,255,0.4)" }}>|</span>
-                            <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>Dashboard Power BI</span>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                            <span style={{ color: "#fff", fontSize: "0.85rem" }}>{user?.name}</span>
-                            <button onClick={handleLogout} style={{ padding: "0.375rem 0.875rem", borderRadius: 6, background: "rgba(255,255,255,0.1)", color: "#fff", border: "1px solid rgba(255,255,255,0.2)", fontSize: "0.8rem", cursor: "pointer" }}>
-                                Déconnexion
-                            </button>
-                        </div>
-                    </div>...
-                    <PowerBiDash user={user} />
-                </div>
+                <PageShell title="Dashboard Power BI" user={user} onBack={handleBackToModules} onLogout={handleLogout}>
+                    <PowerBiDash user={user} onActiveDashboardChange={setActiveDashboard} />
+                </PageShell>
             )}
-            {page === "ml" && (
-                <div>
-                    {/* Topbar avec retour */}
-                    <div style={{
-                        background: COLORS.violet, padding: "0 2rem",
-                        height: 60, display: "flex", alignItems: "center",
-                        justifyContent: "space-between",
-                        boxShadow: "0 2px 8px rgba(59,31,140,0.3)",
-                        fontFamily: "'Segoe UI', sans-serif"
-                    }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                            <button onClick={handleBackToModules} style={{
-                                background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)",
-                                color: "#fff", borderRadius: 6, padding: "0.375rem 0.75rem",
-                                cursor: "pointer", fontSize: "0.85rem", fontWeight: 500
-                            }}>← Retour</button>
-                            <div style={{ width: 1, height: 24, background: "rgba(255,255,255,0.2)" }} />
-                            <div style={{ width: 32, height: 32, borderRadius: 8, background: COLORS.red, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: "0.9rem" }}>D</div>
-                            <span style={{ color: "#fff", fontWeight: 700 }}>Dynamix Services</span>
-                            <span style={{ color: "rgba(255,255,255,0.4)" }}>|</span>
-                            <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>Prediction</span>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                            <span style={{ color: "#fff", fontSize: "0.85rem" }}>{user?.name}</span>
-                            <button onClick={handleLogout} style={{ padding: "0.375rem 0.875rem", borderRadius: 6, background: "rgba(255,255,255,0.1)", color: "#fff", border: "1px solid rgba(255,255,255,0.2)", fontSize: "0.8rem", cursor: "pointer" }}>
-                                Déconnexion
-                            </button>
-                        </div>
-                    </div>...
-                    <MlPredictor />
-                </div>
-            )}
-            {page === "segmentation" && (
-                <div>
-                    {/* Topbar avec retour */}
-                    <div style={{
-                        background: COLORS.violet, padding: "0 2rem",
-                        height: 60, display: "flex", alignItems: "center",
-                        justifyContent: "space-between",
-                        boxShadow: "0 2px 8px rgba(59,31,140,0.3)",
-                        fontFamily: "'Segoe UI', sans-serif"
-                    }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                            <button onClick={handleBackToModules} style={{
-                                background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)",
-                                color: "#fff", borderRadius: 6, padding: "0.375rem 0.75rem",
-                                cursor: "pointer", fontSize: "0.85rem", fontWeight: 500
-                            }}>← Retour</button>
-                            <div style={{ width: 1, height: 24, background: "rgba(255,255,255,0.2)" }} />
-                            <div style={{ width: 32, height: 32, borderRadius: 8, background: COLORS.red, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: "0.9rem" }}>D</div>
-                            <span style={{ color: "#fff", fontWeight: 700 }}>Dynamix Services</span>
-                            <span style={{ color: "rgba(255,255,255,0.4)" }}>|</span>
-                            <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>Segmentation</span>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                            <span style={{ color: "#fff", fontSize: "0.85rem" }}>{user?.name}</span>
-                            <button onClick={handleLogout} style={{ padding: "0.375rem 0.875rem", borderRadius: 6, background: "rgba(255,255,255,0.1)", color: "#fff", border: "1px solid rgba(255,255,255,0.2)", fontSize: "0.8rem", cursor: "pointer" }}>
-                                Déconnexion
-                            </button>
-                        </div>
-                    </div>...
-                    <SegmentationPredictor />
-                </div>
-            )}
-            {page === "agent" && (
-                <div>
-                    {/* Topbar avec retour */}
-                    <div style={{
-                        background: COLORS.violet, padding: "0 2rem",
-                        height: 60, display: "flex", alignItems: "center",
-                        justifyContent: "space-between",
-                        boxShadow: "0 2px 8px rgba(59,31,140,0.3)",
-                        fontFamily: "'Segoe UI', sans-serif"
-                    }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                            <button onClick={handleBackToModules} style={{
-                                background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)",
-                                color: "#fff", borderRadius: 6, padding: "0.375rem 0.75rem",
-                                cursor: "pointer", fontSize: "0.85rem", fontWeight: 500
-                            }}>← Retour</button>
-                            <div style={{ width: 1, height: 24, background: "rgba(255,255,255,0.2)" }} />
-                            <div style={{ width: 32, height: 32, borderRadius: 8, background: COLORS.red, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: "0.9rem" }}>D</div>
-                            <span style={{ color: "#fff", fontWeight: 700 }}>Dynamix Services</span>
-                            <span style={{ color: "rgba(255,255,255,0.4)" }}>|</span>
-                            <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.875rem" }}>AGENT IA</span>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                            <span style={{ color: "#fff", fontSize: "0.85rem" }}>{user?.name}</span>
-                            <button onClick={handleLogout} style={{ padding: "0.375rem 0.875rem", borderRadius: 6, background: "rgba(255,255,255,0.1)", color: "#fff", border: "1px solid rgba(255,255,255,0.2)", fontSize: "0.8rem", cursor: "pointer" }}>
-                                Déconnexion
-                            </button>
-                        </div>
-                    </div>...
-                    <AiAgent user={user} />
-                </div>
+
+            {page !== "login" && (
+                <AgentWidget user={user} activeDashboard={activeDashboard} onUnauthorized={handleLogout} autoOpenGuide />
             )}
         </>
     );
