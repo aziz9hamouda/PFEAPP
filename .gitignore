@@ -365,4 +365,4 @@ FodyWeavers.xsd
 appsettings.Development.json
 **/appsettings.Development.json
 *.pkl
-**/ml/*.pkl
+**/ml/*.pkl.claude/ 
